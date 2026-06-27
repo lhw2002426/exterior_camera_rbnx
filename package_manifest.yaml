@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: MulanPSL-2.0
+#
+# exterior_camera_rbnx — V4L2 USB camera publisher for the
+# "exterior" camera in the piper_grasp VLA loop.
+#
+# Subscribes nothing. Publishes:
+#   /exterior_camera/color/image_raw   (sensor_msgs/Image, bgr8)
+#
+# The VLA stack (vla_client_rbnx) is the only consumer. RELIABLE QoS
+# is used so that QoS-strict subscriptions (vla_client uses BEST_EFFORT
+# but a strict subscriber is also compatible with RELIABLE publisher).
+#
+# Runtime shape (same pattern as piper_description_rbnx):
+#   - scripts/build.sh    — codegen only (no colcon, no vendored ROS).
+#   - scripts/start.sh    — source /opt/ros + exec the python wrapper.
+#   - scripts/atlas_register_and_launch.py
+#       1) RegisterPrimitive(id=exterior_camera,
+#                            namespace=robonix/primitive/camera_exterior)
+#          so rbnx boot's wait_for_registration unblocks.
+#       2) Spawn the in-tree ROS2 node `exterior_camera.camera_node`
+#          which opens the V4L2 device and publishes the frames.
+#       3) Heartbeat atlas every 30s.
+#       4) Forward SIGTERM/SIGINT to the child python process.
+#
+# No Driver(CMD_INIT) handler, no `*/driver` capability. ROS topics
+# are a global side-channel — atlas only needs to know we exist so
+# rbnx boot proceeds.
+#
+# Config (passed via env, since there is no driver):
+#   EXTERIOR_CAMERA_DEVICE   default "/dev/video11"
+#   EXTERIOR_CAMERA_TOPIC    default "/exterior_camera/color/image_raw"
+#   EXTERIOR_CAMERA_FRAME_ID default "exterior_camera"
+#   EXTERIOR_CAMERA_FPS      default 30
+#   EXTERIOR_CAMERA_WIDTH    default 0       (0 = use device default)
+#   EXTERIOR_CAMERA_HEIGHT   default 0
+#
+manifestVersion: 1
+
+package:
+  name: com.robonix.piper_grasp.exterior_camera
+  version: 0.1.0
+  vendor: robonix
+  description: V4L2 exterior camera publisher (USB camera used by VLA exterior view).
+  license: MulanPSL-2.0
+
+build: bash scripts/build.sh
+start: bash scripts/start.sh
+
+# Empty on purpose — atlas registers a provider so rbnx boot proceeds
+# but routes no contracts (ROS topics are global side-channel).
+capabilities: []
