@@ -1,0 +1,19 @@
+# Lifecycle interface for the exterior_camera primitive.
+# `rbnx boot` calls Driver(CMD_INIT, config_json) against this
+# interface and waits for ok=true before moving on. The same
+# servicer also handles CMD_ACTIVATE / CMD_DEACTIVATE / CMD_SHUTDOWN.
+#
+# Defined at PACKAGE level — robonix's global capabilities/ tree
+# ships `primitive/camera/*` (driver/rgb/depth/...) but those are
+# claimed by OrbbecSDK_rbnx in this deploy. The exterior camera
+# is a separate physical device with no depth / camera_info stream,
+# so it gets its own namespace `primitive/camera_exterior/*` to
+# avoid double-registering the global contract.
+[contract]
+id      = "robonix/primitive/camera_exterior/driver"
+version = "1"
+kind    = "primitive"
+idl     = "lifecycle/srv/Driver.srv"
+
+[mode]
+type = "rpc"

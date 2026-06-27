@@ -2,34 +2,29 @@
 # SPDX-License-Identifier: MulanPSL-2.0
 """exterior_camera.camera_node — V4L2 USB camera → ROS2 sensor_msgs/Image.
 
-Standalone rclpy node (NOT a robonix Skill). Lifecycle is controlled
-by atlas_register_and_launch.py: it spawns this script as a child
-process group and forwards SIGTERM on shutdown.
+Standalone rclpy node, spawned as a child by `exterior_camera.main`.
+Config is provided via command-line arguments (NOT env, NOT robonix
+config). The robonix lifecycle layer lives in `main.py`; this file
+is just the publisher.
 
-Config is provided via env (start.sh / atlas_register_and_launch.py
-forward whatever the operator set on the rbnx boot shell):
-
-    EXTERIOR_CAMERA_DEVICE      default /dev/video11
-    EXTERIOR_CAMERA_TOPIC       default /exterior_camera/color/image_raw
-    EXTERIOR_CAMERA_FRAME_ID    default exterior_camera
-    EXTERIOR_CAMERA_FPS         default 30.0
-    EXTERIOR_CAMERA_WIDTH       default 0      (0 = use device default)
-    EXTERIOR_CAMERA_HEIGHT      default 0
-    EXTERIOR_CAMERA_ENCODING    default bgr8   (matches OpenCV's default
-                                                and what most consumers
-                                                are happy with; vla_client
-                                                decodes both rgb8/bgr8)
+Usage (standalone, no robonix):
+    source /opt/ros/humble/setup.bash
+    python3 -u -m exterior_camera.camera_node \\
+        --device /dev/video11 \\
+        --topic /exterior_camera/color/image_raw \\
+        --frame-id exterior_camera \\
+        --fps 30 \\
+        --encoding bgr8
 
 QoS:
-    RELIABLE + KEEP_LAST(10) + VOLATILE. Matches what was used during
-    bring-up — strict consumers (RELIABLE subscribers) are happy, and
-    BEST_EFFORT subscribers (vla_client uses that) are still able to
-    receive (the compatibility rule is "publisher must be at least as
-    strict as the subscriber").
+    RELIABLE + KEEP_LAST(10) + VOLATILE. Strict consumers (RELIABLE
+    subscribers) and lax ones (BEST_EFFORT, used by vla_client) are
+    both compatible — DDS QoS matching rule: publisher must be at
+    least as strict as the subscriber.
 """
 from __future__ import annotations
 
-import os
+import argparse
 import time
 
 import cv2
@@ -45,45 +40,24 @@ from rclpy.qos import (
 from sensor_msgs.msg import Image
 
 
-def _env(name: str, default: str) -> str:
-    v = os.environ.get(name, "").strip()
-    return v if v else default
-
-
-def _env_float(name: str, default: float) -> float:
-    try:
-        return float(_env(name, str(default)))
-    except ValueError:
-        return default
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(_env(name, str(default)))
-    except ValueError:
-        return default
-
-
 class ExteriorCameraPublisher(Node):
-    def __init__(self):
+    def __init__(self, args: argparse.Namespace):
         super().__init__("exterior_camera_publisher")
 
-        self.device     = _env("EXTERIOR_CAMERA_DEVICE",   "/dev/video11")
-        self.topic_name = _env("EXTERIOR_CAMERA_TOPIC",    "/exterior_camera/color/image_raw")
-        self.frame_id   = _env("EXTERIOR_CAMERA_FRAME_ID", "exterior_camera")
-        self.fps        = _env_float("EXTERIOR_CAMERA_FPS",    30.0)
-        self.width      = _env_int("EXTERIOR_CAMERA_WIDTH",     0)
-        self.height     = _env_int("EXTERIOR_CAMERA_HEIGHT",    0)
-        self.encoding   = _env("EXTERIOR_CAMERA_ENCODING", "bgr8").lower()
+        self.device     = args.device
+        self.topic_name = args.topic
+        self.frame_id   = args.frame_id
+        self.fps        = float(args.fps)
+        self.width      = int(args.width)
+        self.height     = int(args.height)
+        self.encoding   = args.encoding.lower()
         if self.encoding not in ("bgr8", "rgb8"):
             self.get_logger().warning(
-                f"unsupported EXTERIOR_CAMERA_ENCODING={self.encoding!r}, "
-                f"falling back to bgr8"
+                f"unsupported --encoding {self.encoding!r}, falling back to bgr8"
             )
             self.encoding = "bgr8"
 
-        # RELIABLE: strict subscribers are happy; BEST_EFFORT subscribers
-        # are also compatible. KEEP_LAST(10) bounds the queue.
+        # RELIABLE: strict subscribers happy; BEST_EFFORT also compatible.
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=10,
@@ -97,7 +71,8 @@ class ExteriorCameraPublisher(Node):
             raise RuntimeError(f"无法打开摄像头：{self.device}")
 
         # Reduce internal buffering latency.
-        self.capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if args.buffer_size > 0:
+            self.capture.set(cv2.CAP_PROP_BUFFERSIZE, int(args.buffer_size))
         if self.fps > 0:
             self.capture.set(cv2.CAP_PROP_FPS, self.fps)
         if self.width > 0:
@@ -136,7 +111,7 @@ class ExteriorCameraPublisher(Node):
                 self.last_read_warning_time = now
             return
 
-        # OpenCV returns BGR. Convert if the operator asked for rgb8.
+        # OpenCV returns BGR. Convert if rgb8 was requested.
         if self.encoding == "rgb8":
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
@@ -158,11 +133,25 @@ class ExteriorCameraPublisher(Node):
         return super().destroy_node()
 
 
-def main(args=None):
-    rclpy.init(args=args)
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Exterior camera publisher")
+    p.add_argument("--device",      default="/dev/video11")
+    p.add_argument("--topic",       default="/exterior_camera/color/image_raw")
+    p.add_argument("--frame-id",    default="exterior_camera")
+    p.add_argument("--fps",         type=float, default=30.0)
+    p.add_argument("--width",       type=int,   default=0,  help="0 = device default")
+    p.add_argument("--height",      type=int,   default=0,  help="0 = device default")
+    p.add_argument("--encoding",    default="bgr8", choices=["bgr8", "rgb8"])
+    p.add_argument("--buffer-size", type=int,   default=1)
+    return p
+
+
+def main(argv=None):
+    args = _build_parser().parse_args(argv)
+    rclpy.init()
     node = None
     try:
-        node = ExteriorCameraPublisher()
+        node = ExteriorCameraPublisher(args)
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass

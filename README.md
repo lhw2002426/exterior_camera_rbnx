@@ -1,111 +1,138 @@
 # exterior_camera_rbnx
 
-V4L2 USB-camera publisher for the **exterior** camera in the
-`piper_grasp_deploy` VLA pipeline.
+V4L2 USB-camera primitive for the **exterior** view in the
+`piper_grasp_deploy` Robonix VLA pipeline.
 
-This is a thin robonix wrapper around a single `rclpy` node — it opens
-a V4L2 device and publishes `sensor_msgs/Image` on a single topic. It
-is the minimum-viable primitive package shape: no Driver(CMD_INIT),
-no MCP tools, no routed atlas contracts. The package just calls
-`RegisterPrimitive` on atlas so `rbnx boot` proceeds, then runs the
-camera node and heartbeats every 30s.
+A thin robonix wrapper around a single `rclpy` publisher — it opens
+a V4L2 device and publishes `sensor_msgs/Image`. Owns the
+`robonix/primitive/camera_exterior/*` namespace.
 
-Sibling to `OrbbecSDK_rbnx` (which provides the wrist/scene camera +
-depth) — use this package for any standard USB color camera that
-should also feed the VLA.
+## Lifecycle
 
-## Topic surface
+Standard primitive driver shape — same as `piper_ctl_rbnx`:
 
-| Topic | Type | QoS | Encoding |
+| Phase | What happens |
+|---|---|
+| `CMD_INIT` | Light cfg validation. No I/O. |
+| `CMD_ACTIVATE` | Spawn the camera publisher subprocess, wait for the first `sensor_msgs/Image` on the configured topic (proves the V4L2 device is alive), atlas-declare `image`. |
+| `CMD_DEACTIVATE` | SIGTERM the subprocess. Idempotent. |
+| `CMD_SHUTDOWN` | Last-chance kill. Idempotent. |
+
+## Capability surface
+
+| Contract | Mode | Transport | Notes |
 |---|---|---|---|
-| `/exterior_camera/color/image_raw` (default, configurable) | `sensor_msgs/Image` | RELIABLE / KEEP_LAST(10) / VOLATILE | `bgr8` (default) or `rgb8` |
+| `robonix/primitive/camera_exterior/driver` | rpc | gRPC | auto-declared by framework |
+| `robonix/primitive/camera_exterior/image`  | topic_out | ROS 2 | `sensor_msgs/Image`, RELIABLE QoS |
 
-No depth, no `camera_info` — this camera is only consumed by
-`vla_client_rbnx`, which does not need either.
+Both contracts are defined at PACKAGE level (see
+`capabilities/primitive/camera_exterior/*.v1.toml`). They use a
+different namespace from `OrbbecSDK_rbnx` (which owns
+`primitive/camera/*`) because the exterior camera is a separate
+physical device serving a different consumer (vla_client's
+"full image" input).
 
-## Config (via env, not Driver(CMD_INIT))
+## Config
 
-This package has **no** `*/driver` capability, so the per-package
-`config:` block in the deploy manifest is ignored. Use the top-level
-`env:` block instead, or export before `rbnx boot`.
+Delivered via `Driver(CMD_INIT, config_json)` from the manifest's
+per-package `config:` block. **NOT** via env (env-based config was
+the v0.1 shape; v0.2 is fully driver-managed).
 
-| Env | Default | Notes |
+| Key | Default | Notes |
 |---|---|---|
-| `EXTERIOR_CAMERA_DEVICE`   | `/dev/video11` | V4L2 device path |
-| `EXTERIOR_CAMERA_TOPIC`    | `/exterior_camera/color/image_raw` | ROS topic name |
-| `EXTERIOR_CAMERA_FRAME_ID` | `exterior_camera` | TF frame id stamped on the message header |
-| `EXTERIOR_CAMERA_FPS`      | `30.0` | Publish rate target (driver may cap it lower) |
-| `EXTERIOR_CAMERA_WIDTH`    | `0`    | `0` = use device default |
-| `EXTERIOR_CAMERA_HEIGHT`   | `0`    | `0` = use device default |
-| `EXTERIOR_CAMERA_ENCODING` | `bgr8` | One of `bgr8`, `rgb8` |
+| `device`             | `/dev/video11` | V4L2 device path |
+| `topic`              | `/exterior_camera/color/image_raw` | Where the publisher publishes; declared on atlas as `camera_exterior/image` |
+| `frame_id`           | `exterior_camera` | TF frame stamped on the message header |
+| `fps`                | `30.0` | Publish rate target (V4L2 driver may cap lower) |
+| `width`              | `0` | `0` = use device default |
+| `height`             | `0` | `0` = use device default |
+| `encoding`           | `bgr8` | `bgr8` (OpenCV native) or `rgb8`. `vla_client_rbnx` decodes both. |
+| `buffer_size`        | `1` | V4L2 internal buffer count; `1` minimizes capture latency |
+| `sentinel_timeout_s` | `10.0` | Max time `on_activate` waits for the first frame |
 
-`vla_client_rbnx`'s `full_image_topic` defaults to
-`/camera/color/image_raw`. If you want it to consume this camera
-instead, override its config to point at the topic this package
-publishes:
+Example deploy manifest snippet:
 
 ```yaml
-config:
-  full_image_topic: /exterior_camera/color/image_raw
+- name: exterior_camera
+  url: https://github.com/lhw2002426/exterior_camera_rbnx
+  branch: main
+  config:
+    device:   "/dev/video11"
+    topic:    "/exterior_camera/color/image_raw"
+    frame_id: "exterior_camera"
+    fps:      30
+    encoding: "bgr8"
+    sentinel_timeout_s: 10.0
+```
+
+## Wiring with `vla_client_rbnx`
+
+`vla_client_rbnx`'s `full_image_topic` defaults to
+`/camera/color/image_raw` (Orbbec). To consume the exterior camera
+instead, override:
+
+```yaml
+- name: vla_client
+  url: https://github.com/lhw2002426/vla_client_rbnx
+  branch: binary-gripper-v3
+  config:
+    full_image_topic:  /exterior_camera/color/image_raw
+    wrist_image_topic: /wrist_camera/color/image_raw
+    ...
 ```
 
 ## Boot ordering
 
-This package is independent of every other primitive — TF
-subtrees, CAN buses, joint streams, none of it is touched. It can
-appear anywhere in the `primitive:` list. Conventionally we keep
-cameras at the top of the list so they have time to warm up before
-downstream services come online.
+Independent of every other primitive (no TF deps, no CAN deps, no
+joint-stream deps). Can appear anywhere in the `primitive:` list.
 
 ## Runtime layout
 
 ```
 exterior_camera_rbnx/
 ├── package_manifest.yaml
+├── README.md
+├── capabilities/primitive/camera_exterior/
+│   ├── driver.v1.toml          # lifecycle/srv/Driver.srv
+│   └── image.v1.toml           # sensor_msgs/Image (topic_out)
 ├── scripts/
-│   ├── build.sh                       # codegen only
-│   ├── start.sh                       # source ROS + exec wrapper
-│   └── atlas_register_and_launch.py   # atlas.RegisterPrimitive + spawn node
+│   ├── build.sh                # rbnx codegen
+│   └── start.sh                # source ROS + python3 -m exterior_camera.main
 └── exterior_camera/
     ├── __init__.py
-    └── camera_node.py                 # rclpy publisher
+    ├── main.py                 # Primitive driver — lifecycle + atlas declare
+    └── camera_node.py          # standalone rclpy publisher (spawned by main.py)
 ```
 
 ## Standalone test (no rbnx)
 
+The publisher node accepts CLI flags so you can run it directly:
+
 ```bash
 source /opt/ros/humble/setup.bash
-cd /Users/howenliu/lab/packages/exterior_camera_rbnx
-EXTERIOR_CAMERA_DEVICE=/dev/video11 \
-EXTERIOR_CAMERA_TOPIC=/exterior_camera/color/image_raw \
+cd ~/packages/exterior_camera_rbnx
 PYTHONPATH="$PWD:${PYTHONPATH:-}" \
-python3 -u -m exterior_camera.camera_node
+python3 -u -m exterior_camera.camera_node \
+    --device /dev/video11 \
+    --topic /exterior_camera/color/image_raw \
+    --fps 30 \
+    --encoding bgr8
 ```
 
 Then in another shell:
 
 ```bash
-ros2 topic hz /exterior_camera/color/image_raw
-ros2 run rqt_image_view rqt_image_view  # optional visual check
+ros2 topic hz /exterior_camera/color/image_raw   # ~30 Hz
+ros2 run rqt_image_view rqt_image_view           # visual check
 ```
 
-## Compatibility notes
+## QoS / encoding notes
 
-- The publisher uses `RELIABLE` QoS. `vla_client_rbnx` subscribes with
-  `BEST_EFFORT`, which is the *less strict* end and therefore
-  compatible (DDS QoS matching rule).
-- The message `encoding` field is set to `bgr8` by default. `vla_client_rbnx`'s
-  `_decode_ros_image()` handles both `bgr8` and `rgb8`, so no
-  client-side change is needed.
-- Header `frame_id` is `exterior_camera` by default; it is **not**
-  joined to any TF tree by this package. Add a static transform
-  elsewhere (e.g. `easy_handeye2_rbnx`) if you need camera→robot
-  extrinsics.
-
-## Why a separate package and not just `fake_camera_pub`?
-
-`fake_camera_pub` ships a static image to validate downstream
-pipelines without real hardware. This package is the **real** camera
-counterpart — it owns a V4L2 device and publishes live frames at
-a target rate, designed to be a peer of `OrbbecSDK_rbnx` /
-`realsense_camera_rbnx` in a deploy manifest.
+- The publisher uses RELIABLE QoS. `vla_client_rbnx` subscribes with
+  BEST_EFFORT — DDS QoS matching: publisher must be at least as
+  strict as subscriber, so RELIABLE → BEST_EFFORT is compatible.
+- The `encoding` field is set to `bgr8` by default. `vla_client_rbnx`'s
+  `_decode_ros_image()` handles both `bgr8` and `rgb8`.
+- Header `frame_id` defaults to `exterior_camera`; not joined to any
+  TF tree by this package. Add a static transform elsewhere
+  (e.g. `easy_handeye2_rbnx`) if you need camera→robot extrinsics.

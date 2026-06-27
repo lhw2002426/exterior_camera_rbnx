@@ -1,0 +1,25 @@
+# Exterior USB-camera RGB stream (sensor_msgs/Image).
+#
+# Source topic is config-driven (default `/exterior_camera/color/image_raw`).
+# Encoding is config-driven (`bgr8` default, `rgb8` also supported).
+# Resolution follows the V4L2 device default unless `width` / `height`
+# are set in cfg.
+#
+# Consumed by:
+#   - vla_client_rbnx (when its `full_image_topic` is set to this topic)
+#     — the only consumer at the time of writing.
+#
+# Why a separate namespace and not `robonix/primitive/camera/rgb`:
+#   OrbbecSDK_rbnx already owns the `primitive/camera/*` global
+#   contracts in this deploy (it provides RGB + depth + camera_info
+#   from the depth-aware Dabai DCW). The exterior USB camera is
+#   color-only and serves a different consumer (VLA exterior view),
+#   so it lives in `primitive/camera_exterior/*`.
+[contract]
+id      = "robonix/primitive/camera_exterior/image"
+version = "1"
+kind    = "primitive"
+idl     = "common_interfaces/sensor_msgs/msg/Image.msg"
+
+[mode]
+type = "topic_out"
